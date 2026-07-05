@@ -9,8 +9,11 @@ Outputs:
   - collusion_edge_data.json
 """
 
+import argparse
 import json
+import os
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib
@@ -24,12 +27,7 @@ from deck import (
 )
 from ev_calculator import calc_edge
 
-# ── Tunable parameters ──────────────────────────────────────────────────────
-N_CONFIG = 50      # colluder-hand samples per (hand, scenario, num_players)
-N_SIMS   = 100      # MC trials per edge estimate inside calc_edge
-SEED     = 42
-Z_99     = 2.576   # z-score for 99% CI
-# ────────────────────────────────────────────────────────────────────────────
+Z_99 = 2.576  # z-score for 99% CI (fixed)
 
 MAX_PLAYERS = 6
 
@@ -131,7 +129,67 @@ def _ci99(edges: List[float]) -> Tuple[float, float, float]:
 
 # ── Core computation ──────────────────────────────────────────────────────────
 
-def compute_all_scenario_edges(rng: np.random.Generator, verbose: bool = True) -> Dict:
+def _compute_hand(args_tuple) -> tuple:
+    """Worker: compute all scenario edges for one hand. Runs in a subprocess."""
+    hand_idx, n_hands, r1, r2, suited, n_config, n_sims, seed_offset = args_tuple
+    rng = np.random.default_rng(seed_offset)
+
+    lbl = hand_label(r1, r2, suited)
+    p1, p2 = representative_cards(r1, r2, suited)
+    player_cards = [p1, p2]
+    base_deck = remove_cards(create_deck(), player_cards)
+    scenarios = _build_scenarios(r1, r2, base_deck)
+    hand_data: Dict = {}
+    log_lines: List[str] = []
+
+    for sk, required in scenarios.items():
+        total_req = sum(required.values())
+        scenario_data: Dict = {}
+
+        for num_players in range(1, MAX_PLAYERS + 1):
+            n_col = num_players - 1
+
+            if n_col == 0:
+                if sk != "none_seen":
+                    continue
+                edges = [calc_edge(player_cards, [], rng, n_sims) for _ in range(n_config)]
+            else:
+                if total_req > n_col * 2:
+                    continue
+                edges = []
+                for _ in range(n_config):
+                    cc = _sample_constrained(rng, base_deck, n_col, required)
+                    if cc is not None:
+                        edges.append(calc_edge(player_cards, cc, rng, n_sims))
+
+            if edges:
+                mean, ci_low, ci_high = _ci99(edges)
+                scenario_data[num_players] = {
+                    "mean":     round(mean,    4),
+                    "ci_low":   round(ci_low,  4),
+                    "ci_high":  round(ci_high, 4),
+                    "decision": "raise" if mean > 0 else "check",
+                }
+
+        if scenario_data:
+            hand_data[sk] = scenario_data
+            p_strs = "  ".join(
+                f"P{p}: {v['mean']:+.3f} [{v['ci_low']:+.3f}, {v['ci_high']:+.3f}] "
+                f"{'RAISE' if v['decision']=='raise' else 'check'}"
+                for p, v in sorted(scenario_data.items())
+            )
+            log_lines.append(f"  [{hand_idx+1}/{n_hands}] {lbl:5s} | {sk:30s} | {p_strs}")
+
+    return lbl, hand_data, log_lines
+
+
+def compute_all_scenario_edges(
+    seed: int,
+    verbose: bool = True,
+    n_config: int = 50,
+    n_sims: int = 100,
+    n_workers: int = 1,
+) -> Dict:
     """
     Returns:
     {
@@ -143,58 +201,35 @@ def compute_all_scenario_edges(rng: np.random.Generator, verbose: bool = True) -
     }
     """
     n_hands = len(TARGET_HANDS)
+    # Each worker gets a unique seed derived from the global seed + hand index
+    work_items = [
+        (i, n_hands, r1, r2, suited, n_config, n_sims, seed * 1000 + i)
+        for i, (r1, r2, suited) in enumerate(TARGET_HANDS)
+    ]
+
     result: Dict = {}
 
-    for hand_idx, (r1, r2, suited) in enumerate(TARGET_HANDS):
-        lbl = hand_label(r1, r2, suited)
-        p1, p2 = representative_cards(r1, r2, suited)
-        player_cards = [p1, p2]
-        base_deck = remove_cards(create_deck(), player_cards)
-
-        scenarios = _build_scenarios(r1, r2, base_deck)
-        hand_data: Dict = {}
-
-        for sk, required in scenarios.items():
-            total_req = sum(required.values())
-            scenario_data: Dict = {}
-
-            for num_players in range(1, MAX_PLAYERS + 1):
-                n_col = num_players - 1
-
-                if n_col == 0:
-                    if sk != "none_seen":
-                        continue  # can't see cards with no colluder
-                    edges = [calc_edge(player_cards, [], rng, N_SIMS) for _ in range(N_CONFIG)]
-                else:
-                    if total_req > n_col * 2:
-                        continue  # scenario impossible with this many colluders
-                    edges = []
-                    for _ in range(N_CONFIG):
-                        cc = _sample_constrained(rng, base_deck, n_col, required)
-                        if cc is not None:
-                            edges.append(calc_edge(player_cards, cc, rng, N_SIMS))
-
-                if edges:
-                    mean, ci_low, ci_high = _ci99(edges)
-                    scenario_data[num_players] = {
-                        "mean":     round(mean,    4),
-                        "ci_low":   round(ci_low,  4),
-                        "ci_high":  round(ci_high, 4),
-                        "decision": "raise" if mean > 0 else "check",
-                    }
-
-            if scenario_data:
-                hand_data[sk] = scenario_data
+    if n_workers > 1:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_compute_hand, item): item[0] for item in work_items}
+            for fut in as_completed(futures):
+                lbl, hand_data, log_lines = fut.result()
+                result[lbl] = hand_data
                 if verbose:
-                    p_strs = "  ".join(
-                        f"P{p}: {v['mean']:+.3f} [{v['ci_low']:+.3f}, {v['ci_high']:+.3f}] {'RAISE' if v['decision']=='raise' else 'check'}"
-                        for p, v in sorted(scenario_data.items())
-                    )
-                    print(f"  [{hand_idx+1}/{n_hands}] {lbl:5s} | {sk:30s} | {p_strs}")
+                    for line in log_lines:
+                        print(line)
+    else:
+        for item in work_items:
+            lbl, hand_data, log_lines = _compute_hand(item)
+            result[lbl] = hand_data
+            if verbose:
+                for line in log_lines:
+                    print(line)
 
-        result[lbl] = hand_data
-
-    return result
+    # Restore TARGET_HANDS order in result
+    return {hand_label(r1, r2, s): result[hand_label(r1, r2, s)]
+            for r1, r2, s in TARGET_HANDS
+            if hand_label(r1, r2, s) in result}
 
 
 # ── Filter ────────────────────────────────────────────────────────────────────
@@ -351,17 +386,43 @@ def save_table_png(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    rng = np.random.default_rng(SEED)
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="UTH Collusion Edge Calculator — compute EV(raise 4x) − EV(check) "
+                    "for borderline hands across player counts and visible-rank scenarios."
+    )
+    p.add_argument("--n-config", type=int, default=50,
+                   help="Colluder-hand samples per (hand, scenario, num_players) [default: 50]")
+    p.add_argument("--n-sims", type=int, default=100,
+                   help="Monte Carlo board runouts per edge estimate [default: 100]")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed [default: 42]")
+    p.add_argument("--table-out", default="collusion_edge_chart.png",
+                   help="Output path for the PNG table [default: collusion_edge_chart.png]")
+    p.add_argument("--json-out", default="collusion_edge_data.json",
+                   help="Output path for the JSON data [default: collusion_edge_data.json]")
+    p.add_argument("--workers", type=int, default=1,
+                   help="Number of parallel worker processes [default: 1]")
+    return p.parse_args()
 
-    print(f"Computing edges for {len(TARGET_HANDS)} hands  (N_CONFIG={N_CONFIG}, N_SIMS={N_SIMS})...")
-    all_data = compute_all_scenario_edges(rng, verbose=True)
+
+def main():
+    args = _parse_args()
+    n_config = args.n_config
+    n_sims   = args.n_sims
+    seed     = args.seed
+
+    print(f"Computing edges for {len(TARGET_HANDS)} hands  "
+          f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, --workers={args.workers})...")
+    all_data = compute_all_scenario_edges(seed=seed, verbose=True,
+                                          n_config=n_config, n_sims=n_sims,
+                                          n_workers=args.workers)
 
     qualifying = filter_decision_flips(all_data)
     qualifying_set = set(qualifying)
     print(f"\n{len(qualifying)} hand/scenario combos with decision flipping across player counts.")
 
-    save_table_png(all_data, qualifying_set)
+    save_table_png(all_data, qualifying_set, output_path=args.table_out)
 
     json_out = {
         lbl: {
@@ -370,9 +431,9 @@ def main():
         }
         for lbl, scenarios in all_data.items()
     }
-    with open("collusion_edge_data.json", "w") as f:
+    with open(args.json_out, "w") as f:
         json.dump(json_out, f, indent=2)
-    print("JSON written to collusion_edge_data.json")
+    print(f"JSON written to {args.json_out}")
 
 
 if __name__ == "__main__":
