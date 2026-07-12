@@ -241,7 +241,6 @@ def compute_all_scenario_edges(
     verbose: bool = True,
     n_config: int = 50,
     n_sims: int = 100,
-    n_workers: int = 1,
     num_players: int = MAX_PLAYERS,
     hands: Optional[List[Tuple[int, int, bool]]] = None,
     max_outs: int = 1,
@@ -255,13 +254,12 @@ def compute_all_scenario_edges(
         }
       }
     }
-    Parallelizes at the (hand × scenario × num_players) level for maximum CPU use.
     """
     active_hands = hands if hands is not None else TARGET_HANDS
     work_items = _build_work_items(seed, n_config, n_sims, [num_players], active_hands, max_outs)
     n_tasks = len(work_items)
     if verbose:
-        print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players={num_players}, workers={n_workers})")
+        print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players={num_players}, cores={os.cpu_count()})")
 
     result: Dict = {}
 
@@ -272,14 +270,10 @@ def compute_all_scenario_edges(
         if verbose and log_line:
             print(log_line)
 
-    if n_workers > 1:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = [pool.submit(_compute_task, item) for item in work_items]
-            for fut in as_completed(futures):
-                _apply(*fut.result())
-    else:
-        for item in work_items:
-            _apply(*_compute_task(item))
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+        futures = [pool.submit(_compute_task, item) for item in work_items]
+        for fut in as_completed(futures):
+            _apply(*fut.result())
 
     # Return in active_hands order, scenarios in insertion order
     ordered: Dict = {}
@@ -465,8 +459,6 @@ def _parse_args():
                    help="Output path for the PNG table [default: collusion_edge_chart.png]")
     p.add_argument("--json-out", default="collusion_edge_data.json",
                    help="Output path for the JSON data [default: collusion_edge_data.json]")
-    p.add_argument("--workers", type=int, default=os.cpu_count(),
-                   help="Number of parallel worker processes [default: all cores]")
     p.add_argument("--num-players", type=int, default=MAX_PLAYERS,
                    help=f"Number of players at the table to simulate [default: {MAX_PLAYERS}]")
     p.add_argument("--target-hands", nargs="+", metavar="HAND",
@@ -498,10 +490,9 @@ def main():
     n_hands = len(hands) if hands is not None else len(TARGET_HANDS)
     print(f"Computing edges for {n_hands} hands  "
           f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, "
-          f"--workers={args.workers}, --num-players={num_players})...")
+          f"--num-players={num_players})...")
     all_data = compute_all_scenario_edges(seed=seed, verbose=True,
                                           n_config=n_config, n_sims=n_sims,
-                                          n_workers=args.workers,
                                           num_players=num_players,
                                           hands=hands,
                                           max_outs=args.max_outs)
