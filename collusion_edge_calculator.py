@@ -36,7 +36,7 @@ TARGET_HANDS: List[Tuple[int, int, bool]] = [
     # A2–A4
     (14, 2, True), (14, 2, False),
     (14, 3, True), (14, 3, False),
-    (14, 4, True), (14, 4, False),
+    (14, 4, False),
     # K2–K6
     (13, 2, True), (13, 2, False),
     (13, 3, True), (13, 3, False),
@@ -58,6 +58,38 @@ TARGET_HANDS: List[Tuple[int, int, bool]] = [
     (3, 3, False),
     (4, 4, False),
 ]
+
+
+# ── Hand string parsing ───────────────────────────────────────────────────────
+
+_NAME_TO_RANK = {v: k for k, v in RANK_NAMES.items()}  # "A"->14, "T"->10, etc.
+
+
+def _parse_hand_str(s: str) -> Tuple[int, int, bool]:
+    """
+    Parse a hand string like 'A2s', 'k3o', 'JTo', '22' into (r1, r2, suited).
+    r1 >= r2. Pairs may omit the trailing 'o'.
+    Raises ValueError on bad input.
+    """
+    s = s.upper().strip()
+    if len(s) == 2:
+        # Pair with no suffix, e.g. "22", "KK"
+        r = _NAME_TO_RANK.get(s[0])
+        if r is None or s[0] != s[1]:
+            raise ValueError(f"Invalid hand: '{s}' — 2-char form must be a pocket pair (e.g. '22')")
+        return r, r, False
+    if len(s) == 3:
+        r1 = _NAME_TO_RANK.get(s[0])
+        r2 = _NAME_TO_RANK.get(s[1])
+        suit_char = s[2]
+        if r1 is None or r2 is None:
+            raise ValueError(f"Invalid rank in '{s}'")
+        if suit_char not in ("S", "O"):
+            raise ValueError(f"Invalid suit suffix in '{s}' — must be 's' or 'o'")
+        suited = suit_char == "S"
+        hi, lo = (r1, r2) if r1 >= r2 else (r2, r1)
+        return hi, lo, suited
+    raise ValueError(f"Cannot parse hand '{s}' — expected 2 or 3 characters (e.g. 'A2s', '22')")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -173,10 +205,11 @@ def _compute_task(args_tuple) -> tuple:
 
 
 def _build_work_items(seed: int, n_config: int, n_sims: int,
-                      player_counts: List[int]) -> list:
+                      player_counts: List[int],
+                      hands: List[Tuple[int, int, bool]]) -> list:
     """Enumerate all valid (hand, scenario, num_players) tasks."""
     raw = []
-    for r1, r2, suited in TARGET_HANDS:
+    for r1, r2, suited in hands:
         p1, p2 = representative_cards(r1, r2, suited)
         base_deck = remove_cards(create_deck(), [p1, p2])
         scenarios = _build_scenarios(r1, r2, base_deck)
@@ -204,6 +237,7 @@ def compute_all_scenario_edges(
     n_sims: int = 100,
     n_workers: int = 1,
     max_players: int = MAX_PLAYERS,
+    hands: Optional[List[Tuple[int, int, bool]]] = None,
 ) -> Dict:
     """
     Returns:
@@ -216,11 +250,12 @@ def compute_all_scenario_edges(
     }
     Parallelizes at the (hand × scenario × num_players) level for maximum CPU use.
     """
+    active_hands = hands if hands is not None else TARGET_HANDS
     player_counts = list(range(1, max_players + 1))
-    work_items = _build_work_items(seed, n_config, n_sims, player_counts)
+    work_items = _build_work_items(seed, n_config, n_sims, player_counts, active_hands)
     n_tasks = len(work_items)
     if verbose:
-        print(f"  Total tasks: {n_tasks}  (hands={len(TARGET_HANDS)}, players=1-{max_players}, workers={n_workers})")
+        print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players=1-{max_players}, workers={n_workers})")
 
     result: Dict = {}
 
@@ -240,9 +275,9 @@ def compute_all_scenario_edges(
         for item in work_items:
             _apply(*_compute_task(item))
 
-    # Return in TARGET_HANDS order, scenarios in insertion order
+    # Return in active_hands order, scenarios in insertion order
     ordered: Dict = {}
-    for r1, r2, suited in TARGET_HANDS:
+    for r1, r2, suited in active_hands:
         lbl = hand_label(r1, r2, suited)
         if lbl not in result:
             continue
@@ -428,6 +463,8 @@ def _parse_args():
                    help="Number of parallel worker processes [default: 1]")
     p.add_argument("--max-players", type=int, default=MAX_PLAYERS,
                    help=f"Compute for 1 through N players [default: {MAX_PLAYERS}]")
+    p.add_argument("--target-hands", nargs="+", metavar="HAND",
+                   help="Hands to analyze, e.g. A2s A2o K3o 22. Overrides built-in list.")
     return p.parse_args()
 
 
@@ -442,13 +479,23 @@ def main():
         print(f"--max-players must be between 1 and {MAX_PLAYERS}")
         import sys; sys.exit(1)
 
-    print(f"Computing edges for {len(TARGET_HANDS)} hands  "
+    hands: Optional[List[Tuple[int, int, bool]]] = None
+    if args.target_hands:
+        try:
+            hands = [_parse_hand_str(h) for h in args.target_hands]
+        except ValueError as e:
+            print(f"Error in --target-hands: {e}")
+            import sys; sys.exit(1)
+
+    n_hands = len(hands) if hands is not None else len(TARGET_HANDS)
+    print(f"Computing edges for {n_hands} hands  "
           f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, "
           f"--workers={args.workers}, --max-players={max_players})...")
     all_data = compute_all_scenario_edges(seed=seed, verbose=True,
                                           n_config=n_config, n_sims=n_sims,
                                           n_workers=args.workers,
-                                          max_players=max_players)
+                                          max_players=max_players,
+                                          hands=hands)
 
     qualifying = filter_decision_flips(all_data)
     qualifying_set = set(qualifying)
