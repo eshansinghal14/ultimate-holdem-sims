@@ -241,7 +241,7 @@ def compute_all_scenario_edges(
     n_config: int = 50,
     n_sims: int = 100,
     n_workers: int = 1,
-    max_players: int = MAX_PLAYERS,
+    num_players: int = MAX_PLAYERS,
     hands: Optional[List[Tuple[int, int, bool]]] = None,
     max_outs: int = 1,
 ) -> Dict:
@@ -257,11 +257,10 @@ def compute_all_scenario_edges(
     Parallelizes at the (hand × scenario × num_players) level for maximum CPU use.
     """
     active_hands = hands if hands is not None else TARGET_HANDS
-    player_counts = list(range(1, max_players + 1))
-    work_items = _build_work_items(seed, n_config, n_sims, player_counts, active_hands, max_outs)
+    work_items = _build_work_items(seed, n_config, n_sims, [num_players], active_hands, max_outs)
     n_tasks = len(work_items)
     if verbose:
-        print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players=1-{max_players}, workers={n_workers})")
+        print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players={num_players}, workers={n_workers})")
 
     result: Dict = {}
 
@@ -331,43 +330,50 @@ def _cell_color(v: dict) -> str:
         return _C_CHECK_SURE if v["ci_high"] < 0 else _C_CHECK_LEAN
 
 
+def _normalize_sk(r1: int, r2: int, sk: str) -> str:
+    """Normalize scenario key to hi/lo form so all hands share column headers."""
+    if sk == "none_seen" or r1 == r2:
+        if r1 == r2 and sk != "none_seen":
+            return sk.replace(f"{RANK_NAMES[r1]}_seen", "seen")
+        return sk
+    hi, lo = RANK_NAMES[r1], RANK_NAMES[r2]
+    return sk.replace(f"{hi}_seen", "high_seen").replace(f"{lo}_seen", "low_seen")
+
+
 def save_table_png(
     all_data: Dict,
-    qualifying_set: set,
     output_path: str = "collusion_edge_chart.png",
+    num_players: int = 1,
 ) -> None:
     """
-    Render all hands × scenarios as a styled PNG table.
+    Render hands as rows, visible-rank scenarios as columns.
 
-    Columns: Hand | Scenario | P1 | P2 | P3 | P4 | P5 | P6
-    Cell format: mean ± half_CI  (two decimal places)
-    Cell color:  green=raise, red=check; intensity shows CI confidence
-    Yellow row background: decision flips across player counts
+    Scenario keys are normalized to hi/lo so all non-pair hands share columns.
+    Cell format: mean ± half_CI   Cell color: green=raise, red=check.
     """
-    p_cols = sorted({p for scenarios in all_data.values()
-                     for pd_ in scenarios.values() for p in pd_})
-    col_headers = ["Hand", "Scenario"] + [f"P{p}" for p in p_cols]
-    n_fixed = 2  # Hand + Scenario columns
-
-    # Collect all rows in display order
-    rows = []
+    # Build ordered column list (normalized scenario keys, in first-seen order)
+    col_order: Dict[str, int] = {}
     for lbl, scenarios in all_data.items():
-        for sk, pd_ in scenarios.items():
-            rows.append((lbl, sk, pd_))
+        r1, r2, _ = _parse_hand_str(lbl)
+        for sk in scenarios:
+            nsk = _normalize_sk(r1, r2, sk)
+            if nsk not in col_order:
+                col_order[nsk] = len(col_order)
+    scenario_cols = sorted(col_order, key=lambda k: col_order[k])
 
-    n_rows = len(rows)
+    n_rows = len(all_data)
+    n_cols = len(scenario_cols)
 
-    ROW_H   = 0.28   # inches per data row
-    COL_W   = [0.55, 2.0] + [1.25] * len(p_cols)   # inches per column
-    fig_w   = sum(COL_W) + 0.2
-    fig_h   = n_rows * ROW_H + 0.8   # +0.8 for title + header
+    ROW_H  = 0.32
+    COL_W  = [0.65] + [1.3] * n_cols
+    fig_w  = sum(COL_W) + 0.2
+    fig_h  = n_rows * ROW_H + 0.9
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.set_xlim(0, fig_w)
     ax.set_ylim(0, fig_h)
     ax.axis("off")
 
-    # Cumulative x positions for columns
     col_x = []
     cx = 0.1
     for w in COL_W:
@@ -377,38 +383,34 @@ def save_table_png(
     HEADER_Y = fig_h - 0.55
     FONT_SZ  = 6.5
 
-    # ── Draw header ──
-    for j, (hdr, x) in enumerate(zip(col_headers, col_x)):
+    # ── Header row ──
+    headers = ["Hand"] + scenario_cols
+    for hdr, x in zip(headers, col_x):
         ax.text(x, HEADER_Y, hdr, ha="center", va="center",
                 fontsize=FONT_SZ + 0.5, fontweight="bold", color="white",
                 bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HEADER, linewidth=0))
 
-    # ── Draw data rows ──
-    prev_lbl = None
-    for i, (lbl, sk, pd_) in enumerate(rows):
+    # ── Data rows (one per hand) ──
+    for i, (lbl, scenarios) in enumerate(all_data.items()):
+        r1, r2, _ = _parse_hand_str(lbl)
         y = HEADER_Y - (i + 1) * ROW_H
-        is_flip = (lbl, sk) in qualifying_set
-        row_bg  = _C_FLIP_ROW if is_flip else "white"
 
-        # Hand label cell (only show when hand changes)
-        hand_display = lbl if lbl != prev_lbl else ""
-        hand_bg = _C_HAND_LABEL if lbl != prev_lbl else row_bg
-        ax.text(col_x[0], y, hand_display, ha="center", va="center",
+        ax.text(col_x[0], y, lbl, ha="center", va="center",
                 fontsize=FONT_SZ, fontweight="bold",
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=hand_bg, linewidth=0.3,
-                          edgecolor="#BDBDBD"))
+                bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HAND_LABEL,
+                          linewidth=0.3, edgecolor="#BDBDBD"))
 
-        # Scenario cell
-        ax.text(col_x[1], y, sk, ha="left", va="center",
-                fontsize=FONT_SZ,
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=row_bg, linewidth=0.3,
-                          edgecolor="#BDBDBD"))
+        # Build normalized-key → entry map for this hand
+        nsk_to_entry: Dict[str, dict] = {}
+        for raw_sk, pd_ in scenarios.items():
+            entry = pd_.get(num_players)
+            if entry is not None:
+                nsk_to_entry[_normalize_sk(r1, r2, raw_sk)] = entry
 
-        # Player-count cells
-        for j, p in enumerate(p_cols):
-            x = col_x[n_fixed + j]
-            if p in pd_:
-                v = pd_[p]
+        for j, nsk in enumerate(scenario_cols):
+            x = col_x[1 + j]
+            if nsk in nsk_to_entry:
+                v = nsk_to_entry[nsk]
                 half_ci = (v["ci_high"] - v["ci_low"]) / 2
                 txt = f"{v['mean']:+.2f}\n±{half_ci:.2f}"
                 bg  = _cell_color(v)
@@ -417,10 +419,8 @@ def save_table_png(
                 bg  = _C_NA
             ax.text(x, y, txt, ha="center", va="center",
                     fontsize=FONT_SZ - 0.5, linespacing=1.2,
-                    bbox=dict(boxstyle="square,pad=0.1", facecolor=bg, linewidth=0.3,
-                              edgecolor="#BDBDBD"))
-
-        prev_lbl = lbl
+                    bbox=dict(boxstyle="square,pad=0.1", facecolor=bg,
+                              linewidth=0.3, edgecolor="#BDBDBD"))
 
     # ── Legend ──
     legend_items = [
@@ -428,17 +428,16 @@ def save_table_png(
         (_C_RAISE_LEAN, "Raise (CI crosses 0)"),
         (_C_CHECK_SURE, "Check (CI < 0)"),
         (_C_CHECK_LEAN, "Check (CI crosses 0)"),
-        (_C_FLIP_ROW,   "Decision flips across # players"),
     ]
     lx = 0.1
     for color, desc in legend_items:
         ax.add_patch(plt.Rectangle((lx, 0.05), 0.18, 0.12, color=color,
                                    transform=ax.transData, clip_on=False))
         ax.text(lx + 0.22, 0.11, desc, va="center", fontsize=5.5)
-        lx += 2.0
+        lx += 2.2
 
     fig.suptitle(
-        "UTH Collusion Edge — All Hands × Visible-Rank Scenarios (99% CI, ante units)\n"
+        f"UTH Collusion Edge — {num_players}-player table (99% CI, ante units)\n"
         "Edge = EV(raise 4x) − EV(optimal check path)",
         fontsize=9, fontweight="bold", y=0.995,
     )
@@ -467,8 +466,8 @@ def _parse_args():
                    help="Output path for the JSON data [default: collusion_edge_data.json]")
     p.add_argument("--workers", type=int, default=1,
                    help="Number of parallel worker processes [default: 1]")
-    p.add_argument("--max-players", type=int, default=MAX_PLAYERS,
-                   help=f"Compute for 1 through N players [default: {MAX_PLAYERS}]")
+    p.add_argument("--num-players", type=int, default=MAX_PLAYERS,
+                   help=f"Number of players at the table to simulate [default: {MAX_PLAYERS}]")
     p.add_argument("--target-hands", nargs="+", metavar="HAND",
                    help="Hands to analyze, e.g. A2s A2o K3o 22. Overrides built-in list.")
     p.add_argument("--max-outs", type=int, default=1,
@@ -482,9 +481,9 @@ def main():
     n_sims   = args.n_sims
     seed     = args.seed
 
-    max_players = args.max_players
-    if not (1 <= max_players <= MAX_PLAYERS):
-        print(f"--max-players must be between 1 and {MAX_PLAYERS}")
+    num_players = args.num_players
+    if not (1 <= num_players <= MAX_PLAYERS):
+        print(f"--num-players must be between 1 and {MAX_PLAYERS}")
         import sys; sys.exit(1)
 
     hands: Optional[List[Tuple[int, int, bool]]] = None
@@ -498,19 +497,15 @@ def main():
     n_hands = len(hands) if hands is not None else len(TARGET_HANDS)
     print(f"Computing edges for {n_hands} hands  "
           f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, "
-          f"--workers={args.workers}, --max-players={max_players})...")
+          f"--workers={args.workers}, --num-players={num_players})...")
     all_data = compute_all_scenario_edges(seed=seed, verbose=True,
                                           n_config=n_config, n_sims=n_sims,
                                           n_workers=args.workers,
-                                          max_players=max_players,
+                                          num_players=num_players,
                                           hands=hands,
                                           max_outs=args.max_outs)
 
-    qualifying = filter_decision_flips(all_data)
-    qualifying_set = set(qualifying)
-    print(f"\n{len(qualifying)} hand/scenario combos with decision flipping across player counts.")
-
-    save_table_png(all_data, qualifying_set, output_path=args.table_out)
+    save_table_png(all_data, output_path=args.table_out, num_players=num_players)
 
     json_out = {
         lbl: {
