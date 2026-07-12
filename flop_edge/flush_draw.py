@@ -226,6 +226,7 @@ def compute_edges(
     n_config: int,
     n_sims: int,
     seed: int,
+    draw_types: List[str] = DRAW_TYPES,
     verbose: bool = True,
 ) -> Tuple[Dict, List[int]]:
     """
@@ -239,7 +240,7 @@ def compute_edges(
 
     work_items = []
     for hc in high_card_ranks:
-        for dt in DRAW_TYPES:
+        for dt in draw_types:
             for n_outs in outs_range:
                 i = len(work_items)
                 work_items.append(
@@ -295,8 +296,9 @@ def save_table_png(
     outs_range: List[int],
     num_players: int,
     output_path: str,
+    draw_types: List[str] = DRAW_TYPES,
 ) -> None:
-    cols = [(dt, n) for dt in DRAW_TYPES for n in outs_range]
+    cols = [(dt, n) for dt in draw_types for n in outs_range]
     col_headers = [
         f"{dt}\n{n} out{'s' if n != 1 else ''}"
         for dt, n in cols
@@ -405,6 +407,8 @@ def _parse_args() -> argparse.Namespace:
                    help="MC runouts per EV estimate [default: 200]")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed [default: 42]")
+    p.add_argument("--draw-types", nargs="+", choices=["2+2", "1+3"], default=["2+2", "1+3"],
+                   help="Draw configurations to test [default: 2+2 1+3]")
     p.add_argument("--png-out",
                    help="Output table PNG path [default: flush_draw_P<N>.png in script dir]")
     return p.parse_args()
@@ -434,9 +438,11 @@ def main() -> None:
     script_dir = str(Path(__file__).parent)
     png_out = args.png_out or os.path.join(script_dir, f"flush_draw_P{args.num_players}.png")
 
+    draw_types = args.draw_types
+
     hc_names = [RANK_NAMES[r] for r in high_card_ranks]
     print(f"UTH flush draw edge: high_cards={hc_names}, {args.num_players} players, "
-          f"max_outs={args.max_outs}")
+          f"draw_types={draw_types}, max_outs={args.max_outs}")
     print(f"  n_config={args.n_config}, n_sims={args.n_sims}, seed={args.seed}")
 
     results, outs_range = compute_edges(
@@ -446,6 +452,7 @@ def main() -> None:
         n_config=args.n_config,
         n_sims=args.n_sims,
         seed=args.seed,
+        draw_types=draw_types,
         verbose=True,
     )
 
@@ -453,11 +460,12 @@ def main() -> None:
         print("No results computed.")
         sys.exit(1)
 
-    save_table_png(results, high_card_ranks, outs_range, args.num_players, png_out)
+    save_table_png(results, high_card_ranks, outs_range, args.num_players, png_out,
+                   draw_types=draw_types)
 
     print("\nSummary:")
     for hc in high_card_ranks:
-        for dt in DRAW_TYPES:
+        for dt in draw_types:
             for n_outs in outs_range:
                 e = results.get(hc, {}).get(dt, {}).get(n_outs)
                 if e is None:
