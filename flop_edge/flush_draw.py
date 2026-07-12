@@ -206,10 +206,12 @@ def _compute_task(args_tuple: tuple) -> tuple:
         return (high_card_rank, draw_type, n_outs_seen), None
 
     mean, ci_low, ci_high = _ci99(edges)
+    std = float(np.std(edges, ddof=1)) if len(edges) > 1 else 0.0
     return (high_card_rank, draw_type, n_outs_seen), {
         "mean":      round(mean, 4),
         "ci_low":    round(ci_low, 4),
         "ci_high":   round(ci_high, 4),
+        "std":       round(std, 4),
         "n_samples": len(edges),
         "decision":  "raise" if mean > 0 else "check",
     }
@@ -263,7 +265,7 @@ def compute_edges(
                 dec = "RAISE 2x" if e["decision"] == "raise" else "check  "
                 print(f"  {RANK_NAMES[hc]:2s} {dt} outs_seen={n_outs}: "
                       f"{e['mean']:+.3f} [{e['ci_low']:+.3f}, {e['ci_high']:+.3f}] "
-                      f"-> {dec}  n={e['n_samples']}")
+                      f"-> {dec}  std={e['std']:.3f}  n={e['n_samples']}")
 
     return results, outs_range
 
@@ -462,7 +464,8 @@ def main() -> None:
                     continue
                 dec = "RAISE 2x" if e["decision"] == "raise" else "check  "
                 print(f"  {RANK_NAMES[hc]:2s} {dt} outs_seen={n_outs}: "
-                      f"edge={e['mean']:+.3f} [{e['ci_low']:+.3f}, {e['ci_high']:+.3f}] -> {dec}")
+                      f"edge={e['mean']:+.3f} [{e['ci_low']:+.3f}, {e['ci_high']:+.3f}] "
+                      f"-> {dec}  std={e['std']:.3f}")
 
 
 if __name__ == "__main__":
