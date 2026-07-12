@@ -465,8 +465,8 @@ def _parse_args():
                    help="Output path for the PNG table [default: collusion_edge_chart.png]")
     p.add_argument("--json-out", default="collusion_edge_data.json",
                    help="Output path for the JSON data [default: collusion_edge_data.json]")
-    p.add_argument("--workers", type=int, default=1,
-                   help="Number of parallel worker processes [default: 1]")
+    p.add_argument("--workers", type=int, default=os.cpu_count(),
+                   help="Number of parallel worker processes [default: all cores]")
     p.add_argument("--num-players", type=int, default=MAX_PLAYERS,
                    help=f"Number of players at the table to simulate [default: {MAX_PLAYERS}]")
     p.add_argument("--target-hands", nargs="+", metavar="HAND",
