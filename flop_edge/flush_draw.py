@@ -16,10 +16,12 @@ Args:
   --n-config    : flop/colluder samples per cell [default: 200]
   --n-sims      : MC runouts per EV estimate [default: 200]
   --seed        : random seed [default: 42]
-  --png-out     : output table PNG path [default: flush_draw_P<N>.png in script dir]
+  --both        : test both 2+2 and 1+3 configs (default: 1+3 only)
+  --json-out    : output JSON path [default: flush_draw_P<N>.json in script dir]
 """
 
 import argparse
+import json
 import os
 import sys
 from itertools import combinations
@@ -27,9 +29,6 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -271,123 +270,6 @@ def compute_edges(
     return results, outs_range
 
 
-# ── Table PNG ─────────────────────────────────────────────────────────────────
-
-_C_RAISE_SURE  = "#C8E6C9"
-_C_RAISE_LEAN  = "#E8F5E9"
-_C_CHECK_SURE  = "#FFCDD2"
-_C_CHECK_LEAN  = "#FFEBEE"
-_C_NA          = "#F5F5F5"
-_C_HEADER      = "#37474F"
-_C_HEADER_ALT  = "#1B5E20"   # dark green for 1+3 group
-_C_HAND_LABEL  = "#ECEFF1"
-
-
-def _cell_color(v: dict) -> str:
-    if v["decision"] == "raise":
-        return _C_RAISE_SURE if v["ci_low"] > 0 else _C_RAISE_LEAN
-    else:
-        return _C_CHECK_SURE if v["ci_high"] < 0 else _C_CHECK_LEAN
-
-
-def save_table_png(
-    results: Dict,
-    high_card_ranks: List[int],
-    outs_range: List[int],
-    num_players: int,
-    output_path: str,
-    draw_types: List[str] = DRAW_TYPES,
-) -> None:
-    cols = [(dt, n) for dt in draw_types for n in outs_range]
-    col_headers = [
-        f"{dt}\n{n} out{'s' if n != 1 else ''}"
-        for dt, n in cols
-    ]
-    header_bg = [
-        _C_HEADER if dt == "2+2" else _C_HEADER_ALT
-        for dt, _ in cols
-    ]
-
-    n_rows = len(high_card_ranks)
-    n_cols = len(cols)
-
-    ROW_H = 0.32
-    COL_W = [0.55] + [1.25] * n_cols
-    fig_w = sum(COL_W) + 0.2
-    fig_h = n_rows * ROW_H + 1.0
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    ax.set_xlim(0, fig_w)
-    ax.set_ylim(0, fig_h)
-    ax.axis("off")
-
-    col_x = []
-    cx = 0.1
-    for w in COL_W:
-        col_x.append(cx + w / 2)
-        cx += w
-
-    HEADER_Y = fig_h - 0.65
-    FONT_SZ = 6.5
-
-    # Header row
-    ax.text(col_x[0], HEADER_Y, "Card", ha="center", va="center",
-            fontsize=FONT_SZ + 0.5, fontweight="bold", color="white",
-            bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HEADER, linewidth=0))
-    for j, (hdr, bg) in enumerate(zip(col_headers, header_bg)):
-        ax.text(col_x[1 + j], HEADER_Y, hdr, ha="center", va="center",
-                fontsize=FONT_SZ, fontweight="bold", color="white", linespacing=1.3,
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=bg, linewidth=0))
-
-    # Data rows
-    for i, hc in enumerate(high_card_ranks):
-        y = HEADER_Y - (i + 1) * ROW_H
-        ax.text(col_x[0], y, RANK_NAMES[hc], ha="center", va="center",
-                fontsize=FONT_SZ, fontweight="bold",
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HAND_LABEL,
-                          linewidth=0.3, edgecolor="#BDBDBD"))
-
-        for j, (dt, n_outs) in enumerate(cols):
-            x = col_x[1 + j]
-            entry = results.get(hc, {}).get(dt, {}).get(n_outs)
-            if entry is not None:
-                half_ci = (entry["ci_high"] - entry["ci_low"]) / 2
-                txt = f"{entry['mean']:+.2f}\n±{half_ci:.2f}"
-                bg = _cell_color(entry)
-            else:
-                txt = "N/A"
-                bg = _C_NA
-            ax.text(x, y, txt, ha="center", va="center",
-                    fontsize=FONT_SZ - 0.5, linespacing=1.2,
-                    bbox=dict(boxstyle="square,pad=0.1", facecolor=bg,
-                              linewidth=0.3, edgecolor="#BDBDBD"))
-
-    # Legend
-    legend_items = [
-        (_C_RAISE_SURE, "Raise (CI > 0)"),
-        (_C_RAISE_LEAN, "Raise (CI crosses 0)"),
-        (_C_CHECK_SURE, "Check (CI < 0)"),
-        (_C_CHECK_LEAN, "Check (CI crosses 0)"),
-    ]
-    lx = 0.1
-    for color, desc in legend_items:
-        ax.add_patch(plt.Rectangle((lx, 0.05), 0.18, 0.12, color=color,
-                                   transform=ax.transData, clip_on=False))
-        ax.text(lx + 0.22, 0.11, desc, va="center", fontsize=5.5)
-        lx += 2.2
-
-    fig.suptitle(
-        f"UTH Flush Draw Flop Edge — {num_players}-player table (99% CI, ante units)\n"
-        "Edge = EV(raise 2x on flop) − EV(check flop)\n"
-        "2+2: high♣+2♣ in hand, 2-club flop   |   1+3: high♣+2♦ in hand, monotone flop",
-        fontsize=8.5, fontweight="bold", y=0.995,
-    )
-
-    plt.savefig(output_path, dpi=180, bbox_inches="tight")
-    print(f"Table PNG saved to {output_path}")
-    plt.close()
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
@@ -407,10 +289,10 @@ def _parse_args() -> argparse.Namespace:
                    help="MC runouts per EV estimate [default: 200]")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed [default: 42]")
-    p.add_argument("--draw-types", nargs="+", choices=["2+2", "1+3"], default=["2+2", "1+3"],
-                   help="Draw configurations to test [default: 2+2 1+3]")
-    p.add_argument("--png-out",
-                   help="Output table PNG path [default: flush_draw_P<N>.png in script dir]")
+    p.add_argument("--both", action="store_true",
+                   help="Test both 2+2 and 1+3 draw configs (default: 1+3 only)")
+    p.add_argument("--json-out",
+                   help="Output JSON path [default: flush_draw_P<N>.json in script dir]")
     return p.parse_args()
 
 
@@ -436,9 +318,9 @@ def main() -> None:
     high_card_ranks = sorted(set(high_card_ranks), reverse=True)
 
     script_dir = str(Path(__file__).parent)
-    png_out = args.png_out or os.path.join(script_dir, f"flush_draw_P{args.num_players}.png")
+    json_out = args.json_out or os.path.join(script_dir, f"flush_draw_P{args.num_players}.json")
 
-    draw_types = args.draw_types
+    draw_types = ["2+2", "1+3"] if args.both else ["1+3"]
 
     hc_names = [RANK_NAMES[r] for r in high_card_ranks]
     print(f"UTH flush draw edge: high_cards={hc_names}, {args.num_players} players, "
@@ -460,8 +342,27 @@ def main() -> None:
         print("No results computed.")
         sys.exit(1)
 
-    save_table_png(results, high_card_ranks, outs_range, args.num_players, png_out,
-                   draw_types=draw_types)
+    json_data = {
+        "metadata": {
+            "num_players": args.num_players,
+            "max_outs": args.max_outs,
+            "n_config": args.n_config,
+            "n_sims": args.n_sims,
+            "seed": args.seed,
+            "draw_types": draw_types,
+            "high_cards": hc_names,
+        },
+        "results": {
+            RANK_NAMES[hc]: {
+                dt: {str(n): results[hc][dt][n] for n in outs_range if n in results.get(hc, {}).get(dt, {})}
+                for dt in draw_types
+            }
+            for hc in high_card_ranks
+        },
+    }
+    with open(json_out, "w") as f:
+        json.dump(json_data, f, indent=2)
+    print(f"JSON written to {json_out}")
 
     print("\nSummary:")
     for hc in high_card_ranks:
