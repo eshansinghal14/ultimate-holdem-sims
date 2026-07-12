@@ -5,7 +5,6 @@ For each TARGET_HAND × visible-rank scenario × num_players, computes
 the 99% confidence interval of EV(raise 4x) − EV(check path).
 
 Outputs:
-  - collusion_edge_chart.png  (only combos where decision flips across player counts)
   - collusion_edge_data.json
 """
 
@@ -16,9 +15,6 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 from deck import (
@@ -305,143 +301,6 @@ def filter_decision_flips(all_data: Dict) -> List[Tuple[str, str]]:
     return qualifying
 
 
-# ── Table PNG ────────────────────────────────────────────────────────────────
-
-# Cell background colors
-_C_RAISE_SURE  = "#C8E6C9"   # green  — mean > 0 and CI entirely above 0
-_C_RAISE_LEAN  = "#E8F5E9"   # pale green — mean > 0 but CI crosses 0
-_C_CHECK_SURE  = "#FFCDD2"   # red   — mean < 0 and CI entirely below 0
-_C_CHECK_LEAN  = "#FFEBEE"   # pale red  — mean < 0 but CI crosses 0
-_C_NA          = "#F5F5F5"   # grey  — not applicable (too few colluders)
-_C_HEADER      = "#37474F"   # dark slate for header row
-_C_HAND_LABEL  = "#ECEFF1"   # light blue-grey for hand-label cells
-_C_FLIP_ROW    = "#FFF9C4"   # yellow highlight for decision-flipping rows
-
-
-def _cell_color(v: dict) -> str:
-    if v["decision"] == "raise":
-        return _C_RAISE_SURE if v["ci_low"] > 0 else _C_RAISE_LEAN
-    else:
-        return _C_CHECK_SURE if v["ci_high"] < 0 else _C_CHECK_LEAN
-
-
-def _normalize_sk(r1: int, r2: int, sk: str) -> str:
-    """Normalize scenario key to hi/lo form so all hands share column headers."""
-    if sk == "none_seen" or r1 == r2:
-        if r1 == r2 and sk != "none_seen":
-            return sk.replace(f"{RANK_NAMES[r1]}_seen", "seen")
-        return sk
-    hi, lo = RANK_NAMES[r1], RANK_NAMES[r2]
-    return sk.replace(f"{hi}_seen", "high_seen").replace(f"{lo}_seen", "low_seen")
-
-
-def save_table_png(
-    all_data: Dict,
-    output_path: str = "collusion_edge_chart.png",
-    num_players: int = 1,
-) -> None:
-    """
-    Render hands as rows, visible-rank scenarios as columns.
-
-    Scenario keys are normalized to hi/lo so all non-pair hands share columns.
-    Cell format: mean ± half_CI   Cell color: green=raise, red=check.
-    """
-    # Build ordered column list (normalized scenario keys, in first-seen order)
-    col_order: Dict[str, int] = {}
-    for lbl, scenarios in all_data.items():
-        r1, r2, _ = _parse_hand_str(lbl)
-        for sk in scenarios:
-            nsk = _normalize_sk(r1, r2, sk)
-            if nsk not in col_order:
-                col_order[nsk] = len(col_order)
-    scenario_cols = sorted(col_order, key=lambda k: col_order[k])
-
-    n_rows = len(all_data)
-    n_cols = len(scenario_cols)
-
-    ROW_H  = 0.32
-    COL_W  = [0.65] + [1.3] * n_cols
-    fig_w  = sum(COL_W) + 0.2
-    fig_h  = n_rows * ROW_H + 0.9
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    ax.set_xlim(0, fig_w)
-    ax.set_ylim(0, fig_h)
-    ax.axis("off")
-
-    col_x = []
-    cx = 0.1
-    for w in COL_W:
-        col_x.append(cx + w / 2)
-        cx += w
-
-    HEADER_Y = fig_h - 0.55
-    FONT_SZ  = 6.5
-
-    # ── Header row ──
-    headers = ["Hand"] + scenario_cols
-    for hdr, x in zip(headers, col_x):
-        ax.text(x, HEADER_Y, hdr, ha="center", va="center",
-                fontsize=FONT_SZ + 0.5, fontweight="bold", color="white",
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HEADER, linewidth=0))
-
-    # ── Data rows (one per hand) ──
-    for i, (lbl, scenarios) in enumerate(all_data.items()):
-        r1, r2, _ = _parse_hand_str(lbl)
-        y = HEADER_Y - (i + 1) * ROW_H
-
-        ax.text(col_x[0], y, lbl, ha="center", va="center",
-                fontsize=FONT_SZ, fontweight="bold",
-                bbox=dict(boxstyle="square,pad=0.1", facecolor=_C_HAND_LABEL,
-                          linewidth=0.3, edgecolor="#BDBDBD"))
-
-        # Build normalized-key → entry map for this hand
-        nsk_to_entry: Dict[str, dict] = {}
-        for raw_sk, pd_ in scenarios.items():
-            entry = pd_.get(num_players)
-            if entry is not None:
-                nsk_to_entry[_normalize_sk(r1, r2, raw_sk)] = entry
-
-        for j, nsk in enumerate(scenario_cols):
-            x = col_x[1 + j]
-            if nsk in nsk_to_entry:
-                v = nsk_to_entry[nsk]
-                half_ci = (v["ci_high"] - v["ci_low"]) / 2
-                txt = f"{v['mean']:+.2f}\n±{half_ci:.2f}"
-                bg  = _cell_color(v)
-            else:
-                txt = "N/A"
-                bg  = _C_NA
-            ax.text(x, y, txt, ha="center", va="center",
-                    fontsize=FONT_SZ - 0.5, linespacing=1.2,
-                    bbox=dict(boxstyle="square,pad=0.1", facecolor=bg,
-                              linewidth=0.3, edgecolor="#BDBDBD"))
-
-    # ── Legend ──
-    legend_items = [
-        (_C_RAISE_SURE, "Raise (CI > 0)"),
-        (_C_RAISE_LEAN, "Raise (CI crosses 0)"),
-        (_C_CHECK_SURE, "Check (CI < 0)"),
-        (_C_CHECK_LEAN, "Check (CI crosses 0)"),
-    ]
-    lx = 0.1
-    for color, desc in legend_items:
-        ax.add_patch(plt.Rectangle((lx, 0.05), 0.18, 0.12, color=color,
-                                   transform=ax.transData, clip_on=False))
-        ax.text(lx + 0.22, 0.11, desc, va="center", fontsize=5.5)
-        lx += 2.2
-
-    fig.suptitle(
-        f"UTH Collusion Edge — {num_players}-player table (99% CI, ante units)\n"
-        "Edge = EV(raise 4x) − EV(optimal check path)",
-        fontsize=9, fontweight="bold", y=0.995,
-    )
-
-    plt.savefig(output_path, dpi=180, bbox_inches="tight")
-    print(f"Table PNG saved to {output_path}")
-    plt.close()
-
-
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def _parse_args():
@@ -455,8 +314,6 @@ def _parse_args():
                    help="Monte Carlo board runouts per edge estimate [default: 100]")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed [default: 42]")
-    p.add_argument("--table-out", default="collusion_edge_chart.png",
-                   help="Output path for the PNG table [default: collusion_edge_chart.png]")
     p.add_argument("--json-out", default="collusion_edge_data.json",
                    help="Output path for the JSON data [default: collusion_edge_data.json]")
     p.add_argument("--num-players", type=int, default=MAX_PLAYERS,
@@ -496,8 +353,6 @@ def main():
                                           num_players=num_players,
                                           hands=hands,
                                           max_outs=args.max_outs)
-
-    save_table_png(all_data, output_path=args.table_out, num_players=num_players)
 
     json_out = {
         lbl: {

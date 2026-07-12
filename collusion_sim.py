@@ -15,7 +15,7 @@ for each hand, look up the edge given the player's cards and visible
 colluder cards. Raise 4x if edge > 0, else follow optimal check path.
 
 Outputs:
-  - Plot: PnL trajectories across hands for every trial + bold mean
+  - JSON: summary stats + mean PnL curve + all final PnLs
   - Print: mean final PnL, std dev, per-hand EV, variance
 """
 
@@ -24,7 +24,6 @@ import sys
 from collections import defaultdict
 from typing import List, Optional
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 from deck import (
@@ -238,45 +237,29 @@ def main():
     print(f"  Max final PnL    : {np.max(final_pnls):+.2f}")
     print("=" * 50)
 
-    # ── Plot ──
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(
-        f"UTH Collusion Simulation  |  {num_players} players, "
-        f"{num_hands} hands/trial, {num_trials} trials",
-        fontsize=13,
-    )
-
-    # Left: PnL trajectories
-    ax = axes[0]
-    x = np.arange(1, num_hands + 1)
-    alpha = max(0.05, min(0.4, 20 / num_trials))
-    for t in range(num_trials):
-        ax.plot(x, all_histories[t], color="steelblue", alpha=alpha, linewidth=0.8)
     mean_curve = all_histories.mean(axis=0)
-    ax.plot(x, mean_curve, color="crimson", linewidth=2, label="Mean PnL")
-    ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-    ax.set_xlabel("Hand number")
-    ax.set_ylabel("Cumulative PnL (ante units)")
-    ax.set_title("PnL Trajectories")
-    ax.legend()
-
-    # Right: Distribution of final PnL
-    ax2 = axes[1]
-    ax2.hist(final_pnls, bins=max(10, num_trials // 5), color="steelblue",
-             edgecolor="white", alpha=0.85)
-    ax2.axvline(np.mean(final_pnls), color="crimson", linewidth=2,
-                label=f"Mean = {np.mean(final_pnls):+.1f}")
-    ax2.axvline(0, color="black", linewidth=0.8, linestyle="--")
-    ax2.set_xlabel("Final PnL after all hands (ante units)")
-    ax2.set_ylabel("Trial count")
-    ax2.set_title("Final PnL Distribution")
-    ax2.legend()
-
-    plt.tight_layout()
-    out_path = f"collusion_sim_P{num_players}_T{num_trials}_H{num_hands}.png"
-    plt.savefig(out_path, dpi=150)
-    print(f"\nPlot saved to {out_path}")
-    plt.show()
+    out_path = f"collusion_sim_P{num_players}_T{num_trials}_H{num_hands}.json"
+    json_data = {
+        "metadata": {
+            "num_players": num_players,
+            "num_trials": num_trials,
+            "num_hands": num_hands,
+            "seed": SEED,
+        },
+        "summary": {
+            "mean_final_pnl":  round(float(np.mean(final_pnls)), 4),
+            "std_final_pnl":   round(float(np.std(final_pnls)), 4),
+            "variance":        round(float(np.var(final_pnls)), 4),
+            "per_hand_ev":     round(float(np.mean(per_hand_evs)), 6),
+            "min_final_pnl":   round(float(np.min(final_pnls)), 4),
+            "max_final_pnl":   round(float(np.max(final_pnls)), 4),
+        },
+        "mean_pnl_by_hand": [round(v, 4) for v in mean_curve.tolist()],
+        "final_pnls": [round(v, 4) for v in final_pnls.tolist()],
+    }
+    with open(out_path, "w") as f:
+        json.dump(json_data, f, indent=2)
+    print(f"\nJSON written to {out_path}")
 
 
 if __name__ == "__main__":
