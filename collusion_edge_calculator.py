@@ -129,58 +129,71 @@ def _ci99(edges: List[float]) -> Tuple[float, float, float]:
 
 # ── Core computation ──────────────────────────────────────────────────────────
 
-def _compute_hand(args_tuple) -> tuple:
-    """Worker: compute all scenario edges for one hand. Runs in a subprocess."""
-    hand_idx, n_hands, r1, r2, suited, n_config, n_sims, seed_offset = args_tuple
+def _compute_task(args_tuple) -> tuple:
+    """
+    Worker: compute edge for one (hand, scenario, num_players) cell.
+    Returns (lbl, sk, num_players, entry_or_None, log_line_or_None).
+    """
+    task_idx, n_tasks, r1, r2, suited, sk, required, num_players, n_config, n_sims, seed_offset = args_tuple
     rng = np.random.default_rng(seed_offset)
 
     lbl = hand_label(r1, r2, suited)
     p1, p2 = representative_cards(r1, r2, suited)
     player_cards = [p1, p2]
     base_deck = remove_cards(create_deck(), player_cards)
-    scenarios = _build_scenarios(r1, r2, base_deck)
-    hand_data: Dict = {}
-    log_lines: List[str] = []
 
-    for sk, required in scenarios.items():
-        total_req = sum(required.values())
-        scenario_data: Dict = {}
+    n_col = num_players - 1
+    total_req = sum(required.values())
 
-        for num_players in range(1, MAX_PLAYERS + 1):
-            n_col = num_players - 1
+    if n_col == 0:
+        edges = [calc_edge(player_cards, [], rng, n_sims) for _ in range(n_config)]
+    else:
+        edges = []
+        for _ in range(n_config):
+            cc = _sample_constrained(rng, base_deck, n_col, required)
+            if cc is not None:
+                edges.append(calc_edge(player_cards, cc, rng, n_sims))
 
-            if n_col == 0:
-                if sk != "none_seen":
+    if not edges:
+        return lbl, sk, num_players, None, None
+
+    mean, ci_low, ci_high = _ci99(edges)
+    entry = {
+        "mean":     round(mean,    4),
+        "ci_low":   round(ci_low,  4),
+        "ci_high":  round(ci_high, 4),
+        "decision": "raise" if mean > 0 else "check",
+    }
+    dec = "RAISE" if entry["decision"] == "raise" else "check"
+    log_line = (
+        f"  [{task_idx+1}/{n_tasks}] {lbl:5s} | {sk:30s} | "
+        f"P{num_players}: {mean:+.3f} [{ci_low:+.3f}, {ci_high:+.3f}] {dec}"
+    )
+    return lbl, sk, num_players, entry, log_line
+
+
+def _build_work_items(seed: int, n_config: int, n_sims: int) -> list:
+    """Enumerate all valid (hand, scenario, num_players) tasks."""
+    raw = []
+    for r1, r2, suited in TARGET_HANDS:
+        p1, p2 = representative_cards(r1, r2, suited)
+        base_deck = remove_cards(create_deck(), [p1, p2])
+        scenarios = _build_scenarios(r1, r2, base_deck)
+        for sk, required in scenarios.items():
+            total_req = sum(required.values())
+            for num_players in range(1, MAX_PLAYERS + 1):
+                n_col = num_players - 1
+                if n_col == 0 and sk != "none_seen":
                     continue
-                edges = [calc_edge(player_cards, [], rng, n_sims) for _ in range(n_config)]
-            else:
-                if total_req > n_col * 2:
+                if n_col > 0 and total_req > n_col * 2:
                     continue
-                edges = []
-                for _ in range(n_config):
-                    cc = _sample_constrained(rng, base_deck, n_col, required)
-                    if cc is not None:
-                        edges.append(calc_edge(player_cards, cc, rng, n_sims))
-
-            if edges:
-                mean, ci_low, ci_high = _ci99(edges)
-                scenario_data[num_players] = {
-                    "mean":     round(mean,    4),
-                    "ci_low":   round(ci_low,  4),
-                    "ci_high":  round(ci_high, 4),
-                    "decision": "raise" if mean > 0 else "check",
-                }
-
-        if scenario_data:
-            hand_data[sk] = scenario_data
-            p_strs = "  ".join(
-                f"P{p}: {v['mean']:+.3f} [{v['ci_low']:+.3f}, {v['ci_high']:+.3f}] "
-                f"{'RAISE' if v['decision']=='raise' else 'check'}"
-                for p, v in sorted(scenario_data.items())
-            )
-            log_lines.append(f"  [{hand_idx+1}/{n_hands}] {lbl:5s} | {sk:30s} | {p_strs}")
-
-    return lbl, hand_data, log_lines
+                raw.append((r1, r2, suited, sk, required, num_players))
+    n_tasks = len(raw)
+    return [
+        (i, n_tasks, r1, r2, suited, sk, required, num_players,
+         n_config, n_sims, seed * 100_000 + i)
+        for i, (r1, r2, suited, sk, required, num_players) in enumerate(raw)
+    ]
 
 
 def compute_all_scenario_edges(
@@ -199,37 +212,43 @@ def compute_all_scenario_edges(
         }
       }
     }
+    Parallelizes at the (hand × scenario × num_players) level for maximum CPU use.
     """
-    n_hands = len(TARGET_HANDS)
-    # Each worker gets a unique seed derived from the global seed + hand index
-    work_items = [
-        (i, n_hands, r1, r2, suited, n_config, n_sims, seed * 1000 + i)
-        for i, (r1, r2, suited) in enumerate(TARGET_HANDS)
-    ]
+    work_items = _build_work_items(seed, n_config, n_sims)
+    n_tasks = len(work_items)
+    if verbose:
+        print(f"  Total tasks: {n_tasks}  (hands={len(TARGET_HANDS)}, workers={n_workers})")
 
     result: Dict = {}
 
+    def _apply(lbl, sk, num_players, entry, log_line):
+        if entry is None:
+            return
+        result.setdefault(lbl, {}).setdefault(sk, {})[num_players] = entry
+        if verbose and log_line:
+            print(log_line)
+
     if n_workers > 1:
         with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_compute_hand, item): item[0] for item in work_items}
+            futures = [pool.submit(_compute_task, item) for item in work_items]
             for fut in as_completed(futures):
-                lbl, hand_data, log_lines = fut.result()
-                result[lbl] = hand_data
-                if verbose:
-                    for line in log_lines:
-                        print(line)
+                _apply(*fut.result())
     else:
         for item in work_items:
-            lbl, hand_data, log_lines = _compute_hand(item)
-            result[lbl] = hand_data
-            if verbose:
-                for line in log_lines:
-                    print(line)
+            _apply(*_compute_task(item))
 
-    # Restore TARGET_HANDS order in result
-    return {hand_label(r1, r2, s): result[hand_label(r1, r2, s)]
-            for r1, r2, s in TARGET_HANDS
-            if hand_label(r1, r2, s) in result}
+    # Return in TARGET_HANDS order, scenarios in insertion order
+    ordered: Dict = {}
+    for r1, r2, suited in TARGET_HANDS:
+        lbl = hand_label(r1, r2, suited)
+        if lbl not in result:
+            continue
+        p1, p2 = representative_cards(r1, r2, suited)
+        base_deck = remove_cards(create_deck(), [p1, p2])
+        scenario_keys = list(_build_scenarios(r1, r2, base_deck).keys())
+        ordered[lbl] = {sk: result[lbl][sk]
+                        for sk in scenario_keys if sk in result[lbl]}
+    return ordered
 
 
 # ── Filter ────────────────────────────────────────────────────────────────────
