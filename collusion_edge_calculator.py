@@ -94,16 +94,14 @@ def _parse_hand_str(s: str) -> Tuple[int, int, bool]:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _build_scenarios(r1: int, r2: int, base_deck: List[Card]) -> Dict[str, Dict[int, int]]:
+def _build_scenarios(r1: int, r2: int, base_deck: List[Card],
+                     max_outs: int = 1) -> Dict[str, Dict[int, int]]:
     """
     Build visible-rank scenarios for a hand.
     Returns {scenario_key: {rank: min_count_required_in_colluder_cards}}.
 
-    Non-pairs (r1=high, r2=low):
-        none_seen | 1 low seen | 1 high seen | 1 high + 1 low seen
-
-    Pocket pairs:
-        none_seen | 1 seen | both remaining seen (up to 2)
+    Non-pairs: enumerate all (n_high, n_low) where each ranges 0..min(max_outs, avail).
+    Pocket pairs: enumerate n=1..min(max_outs, 2) — at most 2 remain after player holds 2.
     """
     avail_r1 = sum(1 for c in base_deck if c.rank == r1)
     avail_r2 = sum(1 for c in base_deck if c.rank == r2) if r2 != r1 else avail_r1
@@ -112,19 +110,25 @@ def _build_scenarios(r1: int, r2: int, base_deck: List[Card]) -> Dict[str, Dict[
     scenarios: Dict[str, Dict[int, int]] = {"none_seen": {}}
 
     if is_pair:
-        if avail_r1 >= 1:
-            scenarios[f"{RANK_NAMES[r1]}_seen=1"] = {r1: 1}
-        if avail_r1 >= 2:
-            scenarios[f"{RANK_NAMES[r1]}_seen=2"] = {r1: 2}
+        cap = min(max_outs, avail_r1)
+        for n in range(1, cap + 1):
+            scenarios[f"{RANK_NAMES[r1]}_seen={n}"] = {r1: n}
     else:
-        # r1 = high rank, r2 = low rank
-        if avail_r2 >= 1:
-            scenarios[f"{RANK_NAMES[r2]}_seen=1"] = {r2: 1}
-        if avail_r1 >= 1:
-            scenarios[f"{RANK_NAMES[r1]}_seen=1"] = {r1: 1}
-        if avail_r1 >= 1 and avail_r2 >= 1:
-            key = f"{RANK_NAMES[r1]}_seen=1,{RANK_NAMES[r2]}_seen=1"
-            scenarios[key] = {r1: 1, r2: 1}
+        cap_r1 = min(max_outs, avail_r1)
+        cap_r2 = min(max_outs, avail_r2)
+        for n1 in range(0, cap_r1 + 1):
+            for n2 in range(0, cap_r2 + 1):
+                if n1 == 0 and n2 == 0:
+                    continue  # already "none_seen"
+                parts = []
+                required: Dict[int, int] = {}
+                if n1 > 0:
+                    parts.append(f"{RANK_NAMES[r1]}_seen={n1}")
+                    required[r1] = n1
+                if n2 > 0:
+                    parts.append(f"{RANK_NAMES[r2]}_seen={n2}")
+                    required[r2] = n2
+                scenarios[",".join(parts)] = required
 
     return scenarios
 
@@ -206,13 +210,14 @@ def _compute_task(args_tuple) -> tuple:
 
 def _build_work_items(seed: int, n_config: int, n_sims: int,
                       player_counts: List[int],
-                      hands: List[Tuple[int, int, bool]]) -> list:
+                      hands: List[Tuple[int, int, bool]],
+                      max_outs: int = 1) -> list:
     """Enumerate all valid (hand, scenario, num_players) tasks."""
     raw = []
     for r1, r2, suited in hands:
         p1, p2 = representative_cards(r1, r2, suited)
         base_deck = remove_cards(create_deck(), [p1, p2])
-        scenarios = _build_scenarios(r1, r2, base_deck)
+        scenarios = _build_scenarios(r1, r2, base_deck, max_outs)
         for sk, required in scenarios.items():
             total_req = sum(required.values())
             for num_players in player_counts:
@@ -238,6 +243,7 @@ def compute_all_scenario_edges(
     n_workers: int = 1,
     max_players: int = MAX_PLAYERS,
     hands: Optional[List[Tuple[int, int, bool]]] = None,
+    max_outs: int = 1,
 ) -> Dict:
     """
     Returns:
@@ -252,7 +258,7 @@ def compute_all_scenario_edges(
     """
     active_hands = hands if hands is not None else TARGET_HANDS
     player_counts = list(range(1, max_players + 1))
-    work_items = _build_work_items(seed, n_config, n_sims, player_counts, active_hands)
+    work_items = _build_work_items(seed, n_config, n_sims, player_counts, active_hands, max_outs)
     n_tasks = len(work_items)
     if verbose:
         print(f"  Total tasks: {n_tasks}  (hands={len(active_hands)}, players=1-{max_players}, workers={n_workers})")
@@ -283,7 +289,7 @@ def compute_all_scenario_edges(
             continue
         p1, p2 = representative_cards(r1, r2, suited)
         base_deck = remove_cards(create_deck(), [p1, p2])
-        scenario_keys = list(_build_scenarios(r1, r2, base_deck).keys())
+        scenario_keys = list(_build_scenarios(r1, r2, base_deck, max_outs).keys())
         ordered[lbl] = {sk: result[lbl][sk]
                         for sk in scenario_keys if sk in result[lbl]}
     return ordered
@@ -465,6 +471,8 @@ def _parse_args():
                    help=f"Compute for 1 through N players [default: {MAX_PLAYERS}]")
     p.add_argument("--target-hands", nargs="+", metavar="HAND",
                    help="Hands to analyze, e.g. A2s A2o K3o 22. Overrides built-in list.")
+    p.add_argument("--max-outs", type=int, default=1,
+                   help="Max copies of each hole-card rank to check as visible [default: 1]")
     return p.parse_args()
 
 
@@ -495,7 +503,8 @@ def main():
                                           n_config=n_config, n_sims=n_sims,
                                           n_workers=args.workers,
                                           max_players=max_players,
-                                          hands=hands)
+                                          hands=hands,
+                                          max_outs=args.max_outs)
 
     qualifying = filter_decision_flips(all_data)
     qualifying_set = set(qualifying)
