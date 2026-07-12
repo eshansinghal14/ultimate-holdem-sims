@@ -212,7 +212,7 @@ def main():
     try:
         edge_data = load_edge_data()
     except FileNotFoundError:
-        print("collusion_edge_data.json not found. Run collusion_edge_calculator.py first.")
+        print("collusion_edge_data.json not found. Run preflop_edge.py first.")
         sys.exit(1)
 
     rng = np.random.default_rng(SEED)
