@@ -43,6 +43,40 @@ def _has_hole_card_pair(player_cards: List[Card], flop: List[Card]) -> bool:
     return h1 == h2 or h1 in flop_ranks or h2 in flop_ranks
 
 
+def _n_overs(player_cards: List[Card], flop: List[Card]) -> int:
+    """Number of hole cards that rank above all flop cards."""
+    max_flop = max(c.rank for c in flop)
+    return sum(1 for hc in player_cards if hc.rank > max_flop)
+
+
+def _has_oesd(player_cards: List[Card], flop: List[Card]) -> bool:
+    """True if hole+flop contains an open-ended straight draw (4 consecutive, both ends open)."""
+    ranks = sorted(set(c.rank for c in player_cards + flop))
+    if 14 in ranks:
+        ranks = sorted(set(ranks) | {1})  # Ace also plays low
+    for i in range(len(ranks) - 3):
+        r = ranks[i]
+        if ranks[i+1] == r+1 and ranks[i+2] == r+2 and ranks[i+3] == r+3:
+            if (r - 1) >= 1 and (r + 4) <= 14:
+                return True
+    return False
+
+
+def _has_gutshot(player_cards: List[Card], flop: List[Card]) -> bool:
+    """True if hole+flop contains a gutshot straight draw (4 cards spanning 5 ranks, one gap)."""
+    ranks = set(c.rank for c in player_cards + flop)
+    if 14 in ranks:
+        ranks.add(1)
+    for low in range(1, 11):
+        window = set(range(low, low + 5))
+        missing = window - ranks
+        if len(missing) == 1:
+            m = next(iter(missing))
+            if m != low and m != low + 4:  # gap is in the middle
+                return True
+    return False
+
+
 def _has_four_flush_hidden_ten_plus(player_cards: List[Card], flop: List[Card]) -> bool:
     """
     True if 4+ of the 5 cards (player + flop) share a suit, and at least one
@@ -71,6 +105,12 @@ def _flop_raise(player_cards: List[Card], flop: List[Card]) -> bool:
             return True
 
     if _has_four_flush_hidden_ten_plus(player_cards, flop):
+        return True
+
+    if _has_oesd(player_cards, flop) and _n_overs(player_cards, flop) >= 1:
+        return True
+
+    if _has_gutshot(player_cards, flop) and _n_overs(player_cards, flop) >= 2:
         return True
 
     return False
