@@ -201,9 +201,10 @@ def _compute_task(args_tuple) -> tuple:
         "decision": "raise" if mean > 0 else "check",
     }
     dec = "RAISE" if entry["decision"] == "raise" else "check"
+    noise = float(np.std(edges, ddof=1)) if len(edges) > 1 else 0.0
     log_line = (
         f"  [{task_idx+1}/{n_tasks}] {lbl:5s} | {sk:30s} | "
-        f"P{num_players}: {mean:+.3f} [{ci_low:+.3f}, {ci_high:+.3f}] {dec}"
+        f"P{num_players}: {mean:+.3f} [{ci_low:+.3f}, {ci_high:+.3f}] {dec}  std={noise:.3f}"
     )
     return lbl, sk, num_players, entry, log_line
 
