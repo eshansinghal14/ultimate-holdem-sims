@@ -172,7 +172,8 @@ def _compute_task(args_tuple) -> tuple:
     return lbl, sk, num_players, entry, log_line
 
 
-def _build_work_items(seed: int, n_config: int, n_sims: int) -> list:
+def _build_work_items(seed: int, n_config: int, n_sims: int,
+                      player_counts: List[int]) -> list:
     """Enumerate all valid (hand, scenario, num_players) tasks."""
     raw = []
     for r1, r2, suited in TARGET_HANDS:
@@ -181,7 +182,7 @@ def _build_work_items(seed: int, n_config: int, n_sims: int) -> list:
         scenarios = _build_scenarios(r1, r2, base_deck)
         for sk, required in scenarios.items():
             total_req = sum(required.values())
-            for num_players in range(1, MAX_PLAYERS + 1):
+            for num_players in player_counts:
                 n_col = num_players - 1
                 if n_col == 0 and sk != "none_seen":
                     continue
@@ -202,6 +203,7 @@ def compute_all_scenario_edges(
     n_config: int = 50,
     n_sims: int = 100,
     n_workers: int = 1,
+    max_players: int = MAX_PLAYERS,
 ) -> Dict:
     """
     Returns:
@@ -214,10 +216,11 @@ def compute_all_scenario_edges(
     }
     Parallelizes at the (hand × scenario × num_players) level for maximum CPU use.
     """
-    work_items = _build_work_items(seed, n_config, n_sims)
+    player_counts = list(range(1, max_players + 1))
+    work_items = _build_work_items(seed, n_config, n_sims, player_counts)
     n_tasks = len(work_items)
     if verbose:
-        print(f"  Total tasks: {n_tasks}  (hands={len(TARGET_HANDS)}, workers={n_workers})")
+        print(f"  Total tasks: {n_tasks}  (hands={len(TARGET_HANDS)}, players=1-{max_players}, workers={n_workers})")
 
     result: Dict = {}
 
@@ -300,7 +303,8 @@ def save_table_png(
     Cell color:  green=raise, red=check; intensity shows CI confidence
     Yellow row background: decision flips across player counts
     """
-    p_cols = list(range(1, MAX_PLAYERS + 1))
+    p_cols = sorted({p for scenarios in all_data.values()
+                     for pd_ in scenarios.values() for p in pd_})
     col_headers = ["Hand", "Scenario"] + [f"P{p}" for p in p_cols]
     n_fixed = 2  # Hand + Scenario columns
 
@@ -422,6 +426,8 @@ def _parse_args():
                    help="Output path for the JSON data [default: collusion_edge_data.json]")
     p.add_argument("--workers", type=int, default=1,
                    help="Number of parallel worker processes [default: 1]")
+    p.add_argument("--max-players", type=int, default=MAX_PLAYERS,
+                   help=f"Compute for 1 through N players [default: {MAX_PLAYERS}]")
     return p.parse_args()
 
 
@@ -431,11 +437,18 @@ def main():
     n_sims   = args.n_sims
     seed     = args.seed
 
+    max_players = args.max_players
+    if not (1 <= max_players <= MAX_PLAYERS):
+        print(f"--max-players must be between 1 and {MAX_PLAYERS}")
+        import sys; sys.exit(1)
+
     print(f"Computing edges for {len(TARGET_HANDS)} hands  "
-          f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, --workers={args.workers})...")
+          f"(--n-config={n_config}, --n-sims={n_sims}, --seed={seed}, "
+          f"--workers={args.workers}, --max-players={max_players})...")
     all_data = compute_all_scenario_edges(seed=seed, verbose=True,
                                           n_config=n_config, n_sims=n_sims,
-                                          n_workers=args.workers)
+                                          n_workers=args.workers,
+                                          max_players=max_players)
 
     qualifying = filter_decision_flips(all_data)
     qualifying_set = set(qualifying)
